@@ -116,15 +116,24 @@ def analyze_video():
 
     cap.release()
     out.release()
+    JsonUrl = str(f"uploads/{uuid.uuid4()}.json")
+    VidUrl= str(f"uploads/{uuid.uuid4()}.mp4")
+    
 
     output_json = f"tmp/{uuid.uuid4()}.json"
     with open(output_json, "w") as f:
         json.dump(detections, f)
 
-    s3_client.upload_file(output_json, settings.S3_BUCKET, f"outputs/{uuid.uuid4()}.json")
-    s3_client.upload_file(output_video_path, settings.S3_BUCKET, f"outputs/{uuid.uuid4()}.mp4")
+    s3_client.upload_file(output_json, settings.S3_BUCKET, JsonUrl)
+    s3_client.upload_file(output_video_path, settings.S3_BUCKET,VidUrl)
+
+   
 
     print("Tracking selesai. Diupload ke S3.")
-
-analyze_video()
+    result  = {'json_result':JsonUrl,'video_result':VidUrl}
+    result = json.dumps(result)
+    return json.loads(result)
     
+a =  analyze_video()
+
+print(a)
