@@ -26,6 +26,7 @@ def analyze_video():
     video_url = "testvideo.mp4"
     os.makedirs("tmp", exist_ok=True)
 
+    #download vide
     local_video_path = f"tmp/{video_url}"
     s3_client.download_file(settings.S3_BUCKET, video_url, local_video_path)
 
@@ -38,7 +39,7 @@ def analyze_video():
     output_video_path = f"tmp/{uuid.uuid4()}.mp4"
     out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
-    # Dominant color untuk clustering tim
+    # pick domninant color
     dominant_colors = []
     i = 0
     while i < 50 and cap.isOpened():
@@ -55,6 +56,7 @@ def analyze_video():
                         dominant_colors.append(get_dominant_color(roi))
         i += 1
 
+    # clustering 2 team
     kmeans = KMeans(n_clusters=2, n_init=10).fit(dominant_colors)
     team_colors = kmeans.cluster_centers_
 
@@ -63,34 +65,20 @@ def analyze_video():
     id_to_team = {}
     team_counts = defaultdict(int)
     detections = []
-    shot_data = []
-    ball_history = []
-
     i = 0
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
         frame_dets = []
-        ball_coords = None
-        ring_coords = None
-
         results = model(frame)
         for result in results:
             for box, cls in zip(result.boxes.xyxy, result.boxes.cls):
-                x1, y1, x2, y2 = map(int, box[:4])
-                conf = float(result.boxes.conf[0]) if hasattr(result.boxes, 'conf') else 0.9
-
-                if int(cls) == 0:  # bola
-                    cx = int((x1 + x2) / 2)
-                    cy = int((y1 + y2) / 2)
-                    ball_coords = (cx, cy)
-
-                elif int(cls) == 1:  # ring
-                    ring_coords = (int((x1 + x2) / 2), int((y1 + y2) / 2))
-
-                elif int(cls) == 2:  # player
+                if int(cls) == 2:  
+                    x1, y1, x2, y2 = map(int, box[:4])
+                    conf = float(result.boxes.conf[0]) if hasattr(result.boxes, 'conf') else 0.9
                     frame_dets.append([x1, y1, x2, y2, conf])
 
         tracks = tracker.update(np.array(frame_dets))
@@ -109,6 +97,7 @@ def analyze_video():
             color = tuple(map(int, team_colors[team_id])) if team_id != -1 else (255, 255, 255)
             team_counts[f"Team {team_id+1}"] += 1
 
+            # Draw bbox 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f'#{track_id} | T{team_id+1}', (x1, y1 - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
@@ -120,20 +109,6 @@ def analyze_video():
                 "bbox": [x1, y1, x2, y2]
             })
 
-        if ball_coords:
-            ball_history.append(ball_coords)
-            if ring_coords:
-                dx = abs(ball_coords[0] - ring_coords[0])
-                dy = abs(ball_coords[1] - ring_coords[1])
-                if dx < 50 and dy < 50:
-                    mx = (ball_coords[0] / width) * 8
-                    my = (ball_coords[1] / height) * 7
-                    shot_data.append({
-                        "x": round(mx, 2),
-                        "y": round(my, 2),
-                        "result": "made"
-                    })
-
         out.write(frame)
         i += 1
         progress = int((i / frame_count) * 100)
@@ -141,35 +116,23 @@ def analyze_video():
 
     cap.release()
     out.release()
+    JsonUrl = str(f"uploads/{uuid.uuid4()}.json")
+    VidUrl= str(f"uploads/{uuid.uuid4()}.mp4")
+    
 
-    # Generate file paths
-    json_tracking_path = f"tmp/{uuid.uuid4()}.json"
-    json_shot_path = f"tmp/{uuid.uuid4()}.json"
-    s3_tracking_key = f"uploads/{uuid.uuid4()}.json"
-    s3_shot_key = f"uploads/{uuid.uuid4()}.json"
-    s3_video_key = f"uploads/{uuid.uuid4()}.mp4"
-
-    # Save JSON files
-    with open(json_tracking_path, "w") as f:
+    output_json = f"tmp/{uuid.uuid4()}.json"
+    with open(output_json, "w") as f:
         json.dump(detections, f)
-    with open(json_shot_path, "w") as f:
-        json.dump(shot_data, f)
 
-    # Upload to S3
-    s3_client.upload_file(json_tracking_path, settings.S3_BUCKET, s3_tracking_key)
-    s3_client.upload_file(json_shot_path, settings.S3_BUCKET, s3_shot_key)
-    s3_client.upload_file(output_video_path, settings.S3_BUCKET, s3_video_key)
+    s3_client.upload_file(output_json, settings.S3_BUCKET, JsonUrl)
+    s3_client.upload_file(output_video_path, settings.S3_BUCKET,VidUrl)
+
+   
 
     print("Tracking selesai. Diupload ke S3.")
-
-    result = {
-        "json_result": s3_tracking_key,
-        "video_result": s3_video_key,
-        "shot_result": s3_shot_key
-    }
-
-    return result
-
+    result  = {'json_result':JsonUrl,'video_result':VidUrl}
+    result = json.dumps(result)
+    return json.loads(result)
     
 a =  analyze_video()
 
