@@ -86,9 +86,11 @@ def analyze_video():
                     cx = int((x1 + x2) / 2)
                     cy = int((y1 + y2) / 2)
                     ball_coords = (cx, cy)
+                    print(f"[Frame {i}] Bola terdeteksi di {ball_coords}")
 
                 elif int(cls) == 1:  # ring
                     ring_coords = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+                    print(f"[Frame {i}] Ring terdeteksi di {ring_coords}")
 
                 elif int(cls) == 2:  # player
                     frame_dets.append([x1, y1, x2, y2, conf])

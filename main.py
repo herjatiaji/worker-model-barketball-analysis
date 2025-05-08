@@ -16,7 +16,8 @@ async def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     worker = Worker("videoQueue", analyze_video, {
-        "connection": settings.REDIS_URL
+        "connection": settings.REDIS_URL,
+        "lockDuration": 600000
     })
 
     await shutdown_event.wait()
