@@ -22,7 +22,16 @@ def get_dominant_color(image, k=1):
     kmeans.fit(pixels)
     return tuple(map(int, kmeans.cluster_centers_[0]))
 
-async def analyze_video(job: Job, token=None):
+
+async def run_worker(job: Job, token=None):
+    loop = asyncio.get_running_loop()
+    result = await asyncio.to_thread(analyze_video,job,loop)
+    print('selesai')
+    return result
+
+
+
+def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     print(job.data)
     video_url = job.data.get('video_url')
     os.makedirs("tmp", exist_ok=True)
@@ -89,15 +98,12 @@ async def analyze_video(job: Job, token=None):
                 elif int(cls) == 1 and not ring_found:  # Ring
                     ring_bbox = [x1, y1, x2, y2]
                     ring_found = True
+                    ring_px_diameter = np.mean([ring_bbox[2] - ring_bbox[0], ring_bbox[3] - ring_bbox[1]])
+                    pixel_to_meter = ring_px_diameter / 0.45
 
                 elif int(cls) == 2:  # Player
                     frame_dets.append([x1, y1, x2, y2, conf])
 
-        # Hitung pixel_to_meter jika ring terdeteksi
-        pixel_to_meter = None
-        if ring_bbox:
-            ring_px_diameter = np.mean([ring_bbox[2] - ring_bbox[0], ring_bbox[3] - ring_bbox[1]])
-            pixel_to_meter = ring_px_diameter / 0.45  # diameter ring 0.45 m
 
         tracks = tracker.update(np.array(frame_dets))
 
@@ -132,10 +138,11 @@ async def analyze_video(job: Job, token=None):
             dx = abs(ball_coords[0] - ring_center[0])
             dy = abs(ball_coords[1] - ring_center[1])
             if dx < 50 and dy < 50:
+                nearest_player = min(player_data[-len(tracks):], key=lambda p: np.hypot(p['bbox'][0]-ball_coords[0], p['bbox'][1]-ball_coords[1]))
                 shot_data.append({
                     "x": ball_coords[0],
                     "y": ball_coords[1],
-                    "team_id": team_id,  
+                    "team_id": nearest_player["team_id"],
                     "result": "made"
                 })
 
@@ -145,7 +152,7 @@ async def analyze_video(job: Job, token=None):
         print(progress)
 
         if progress % 5 == 0 and progress != last_progress:
-            await job.updateProgress(progress)
+            asyncio.run_coroutine_threadsafe(job.updateProgress(progress),loop)
             
             last_progress = progress
         
@@ -159,7 +166,7 @@ async def analyze_video(job: Job, token=None):
     else:
         court_length_px = court_width_px = None
 
-    # Ubah bbox player menjadi koordinat tengah
+    # center coordinat bbox
     converted_players = []
     for p in player_data:
         x1, y1, x2, y2 = p["bbox"]
@@ -192,7 +199,7 @@ async def analyze_video(job: Job, token=None):
     with open(shot_json_path, "w") as f:
         json.dump(shot_json, f)
 
-    # Upload ke S3
+    # Upload 
     s3_json_key = f"uploads/{uuid.uuid4()}.json"
     s3_shot_key = f"uploads/{uuid.uuid4()}.json"
     s3_video_key = f"uploads/{uuid.uuid4()}.mp4"
@@ -202,7 +209,7 @@ async def analyze_video(job: Job, token=None):
     s3_client.upload_file(output_video_path, settings.S3_BUCKET, s3_video_key)
 
     print("selesai")
-    
+
 
     return json.dumps({
     "json_result": s3_json_key,

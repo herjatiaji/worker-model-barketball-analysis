@@ -2,7 +2,7 @@ import asyncio
 import signal
 from bullmq import Worker
 from config.settings import settings
-from workers.analyze import analyze_video
+from workers.analyze import analyze_video, run_worker
 
 
 async def main():
@@ -15,9 +15,8 @@ async def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    worker = Worker("videoQueue", analyze_video, {
+    worker = Worker("videoQueue", run_worker, {
         "connection": settings.REDIS_URL,
-        "lockDuration": 600000
     })
 
     await shutdown_event.wait()

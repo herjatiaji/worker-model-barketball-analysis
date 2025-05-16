@@ -10,9 +10,9 @@ import json
 import numpy as np
 from sklearn.cluster import KMeans
 from collections import defaultdict
-from sort import Sort 
+from sort import Sort
 
-model = YOLO("bestv2.pt") 
+model = YOLO("bestv2.pt")
 
 def get_dominant_color(image, k=1):
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -21,6 +21,33 @@ def get_dominant_color(image, k=1):
     kmeans = KMeans(n_clusters=k, n_init=10)
     kmeans.fit(pixels)
     return tuple(map(int, kmeans.cluster_centers_[0]))
+
+def analyze_shot(ball_coords, ring_coords, tracker, frame, team_colors, width, height):
+    # Tentukan jarak tembakan (misalnya 50 piksel dari ring)
+    shot_radius = 50
+    dx = abs(ball_coords[0] - ring_coords[0])
+    dy = abs(ball_coords[1] - ring_coords[1])
+
+    # Cek apakah bola cukup dekat dengan ring untuk dianggap sebagai tembakan
+    if dx < shot_radius and dy < shot_radius:
+        # Cari pemain terdekat dengan bola
+        nearest_player = None
+        min_distance = float('inf')
+        for track in tracker:
+            player_x, player_y, track_id = map(int, track[:3])
+            distance = np.linalg.norm(np.array([player_x, player_y]) - np.array(ball_coords))
+            if distance < min_distance:
+                min_distance = distance
+                nearest_player = track_id
+
+        # Tandai pemain yang melakukan tembakan dan timnya
+        if nearest_player is not None:
+            team_id = id_to_team.get(nearest_player, -1)
+            color = tuple(map(int, team_colors[team_id])) if team_id != -1 else (255, 255, 255)
+            # Gambar bounding box dan ID tembakan
+            cv2.putText(frame, f"Shot by T{team_id+1}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            return nearest_player, team_id, ball_coords, "Shot Detected"
+    return None, None, None, "No Shot"
 
 def analyze_video():
     video_url = "testvideo.mp4"
@@ -125,14 +152,13 @@ def analyze_video():
         if ball_coords:
             ball_history.append(ball_coords)
             if ring_coords:
-                dx = abs(ball_coords[0] - ring_coords[0])
-                dy = abs(ball_coords[1] - ring_coords[1])
-                if dx < 50 and dy < 50:
-                    mx = (ball_coords[0] / width) * 8
-                    my = (ball_coords[1] / height) * 7
+                # Analisis tembakan berdasarkan posisi bola dan ring
+                nearest_player, team_id, shot_coords, status = analyze_shot(ball_coords, ring_coords, tracks, frame, team_colors, width, height)
+                if status == "Shot Detected":
                     shot_data.append({
-                        "x": round(mx, 2),
-                        "y": round(my, 2),
+                        "x": round(shot_coords[0] / width * 8, 2),
+                        "y": round(shot_coords[1] / height * 7, 2),
+                        "team_id": team_id,
                         "result": "made"
                     })
 
@@ -172,7 +198,5 @@ def analyze_video():
 
     return result
 
-    
-a =  analyze_video()
-
+a = analyze_video()
 print(a)
