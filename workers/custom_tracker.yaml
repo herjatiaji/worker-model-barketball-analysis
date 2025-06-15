@@ -1,0 +1,18 @@
+# custom_tracker.yaml
+
+tracker_type: botsort
+track_high_thresh: 0.5
+track_low_thresh: 0.1
+new_track_thresh: 0.6
+track_buffer: 30 
+match_thresh: 0.8
+
+# --- This is the key change ---
+# Increase the tracker's "memory" from 30 frames to 90 frames.
+max_age: 90
+
+proximity_thresh: 0.5
+appearance_thresh: 0.25
+
+# This problematic line is disabled to prevent the freeze.
+# cmc_method: osnet_x0_25_msmt17

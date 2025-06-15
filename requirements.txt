@@ -21,4 +21,4 @@ ultralytics==8.0.20
 opencv-python
 numpy
 scikit-learn
-git+https://github.com/abewley/sort.git
+

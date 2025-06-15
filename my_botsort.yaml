@@ -1,0 +1,18 @@
+# my_botsort.yaml
+
+tracker_type: botsort # This is BoT-SORT
+track_high_thresh: 0.5
+track_low_thresh: 0.1
+new_track_thresh: 0.6
+track_buffer: 30 
+match_thresh: 0.8
+
+# --- The Important Change is Here ---
+# The number of frames to keep a track alive without a detection.
+# Default is 30. Let's increase it to 90 (3 seconds at 30 FPS).
+max_age: 90
+
+# Other settings
+proximity_thresh: 0.5
+appearance_thresh: 0.25
+# cmc_method: osnet_x0_25_msmt17
