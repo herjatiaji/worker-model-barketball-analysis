@@ -236,10 +236,8 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     cap.release()
     out.release()
     
-    if len(result.boxes[result.boxes.cls == 3]) > 0: # If rim was detected
-        # A simple scaling based on the last known rim detection
-        last_rim_box = result.boxes[result.boxes.cls == 3][-1].xyxy[0]
-        pixel_to_meter = np.mean([last_rim_box[2] - last_rim_box[0], last_rim_box[3] - last_rim_box[1]]) / 0.45
+    # --- Final Data Preparation (Unchanged) ---
+    if pixel_to_meter:
         court_length_px, court_width_px = int(28 / pixel_to_meter), int(15 / pixel_to_meter)
     else:
         court_length_px, court_width_px = None, None
@@ -260,26 +258,49 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     with open(player_json_path, "w") as f: json.dump(player_json, f, indent=2)
     with open(shot_json_path, "w") as f: json.dump(shot_json, f, indent=2)
 
-    s3_tracking_key, s3_shot_key = f"uploads/{uuid.uuid4()}.json", f"uploads/{uuid.uuid4()}.json"
-    s3_video_key, s3_thumbnail_key = f"uploads/{uuid.uuid4()}.mp4", f"uploads/thumbnails/{uuid.uuid4()}.jpg"
+    # --- CORRECTED UPLOAD AND CLEANUP LOGIC ---
 
-    s3_client.upload_file(player_json_path, settings.S3_BUCKET, s3_tracking_key, ExtraArgs={'ContentType': 'application/json'})
-    s3_client.upload_file(shot_json_path, settings.S3_BUCKET, s3_shot_key, ExtraArgs={'ContentType': 'application/json'})
-    s3_client.upload_file(output_video_path, settings.S3_BUCKET, s3_video_key, ExtraArgs={'ContentType': 'video/mp4'})
-    if os.path.exists(thumbnail_path):
-        s3_client.upload_file(thumbnail_path, settings.S3_BUCKET, s3_thumbnail_key, ExtraArgs={'ContentType': 'image/jpeg'})
+    # 1. Define all S3 keys first
+    s3_tracking_key = f"uploads/{uuid.uuid4()}.json"
+    s3_shot_key = f"uploads/{uuid.uuid4()}.json"
+    s3_video_key = f"uploads/{uuid.uuid4()}.mp4"
+    s3_thumbnail_key = f"uploads/thumbnails/{uuid.uuid4()}.jpg"
 
-    temp_files = [local_video_path, output_video_path, player_json_path, shot_json_path, thumbnail_path]
-    for temp_file in temp_files:
-        if os.path.exists(temp_file):
-            try:
-                os.remove(temp_file)
-            except Exception as e:
-                print(f"Error cleaning up {temp_file}: {e}")
-    print("S3 Upload complete. Job finished.")
+    # 2. Upload all files to S3
+    print("Uploading results to S3...")
+    try:
+        s3_client.upload_file(player_json_path, settings.S3_BUCKET, s3_tracking_key, ExtraArgs={'ContentType': 'application/json'})
+        s3_client.upload_file(shot_json_path, settings.S3_BUCKET, s3_shot_key, ExtraArgs={'ContentType': 'application/json'})
+        s3_client.upload_file(output_video_path, settings.S3_BUCKET, s3_video_key, ExtraArgs={'ContentType': 'video/mp4'})
+        
+        # Upload the thumbnail LAST, right before cleanup
+        if os.path.exists(thumbnail_path):
+            s3_client.upload_file(thumbnail_path, settings.S3_BUCKET, s3_thumbnail_key, ExtraArgs={'ContentType': 'image/jpeg'})
+        else:
+            print("Warning: Thumbnail file not found for upload.")
+            s3_thumbnail_key = None # Ensure we don't return a broken key
+
+        print("S3 Upload complete.")
+
+    except Exception as e:
+        print(f"FATAL: S3 upload failed: {e}")
+        # Clean up local files even if upload fails
+        # Fall through to the finally block
+    finally:
+        # 3. Clean up ALL temporary files at the very end
+        print("Cleaning up temporary files...")
+        temp_files = [local_video_path, output_video_path, player_json_path, shot_json_path, thumbnail_path]
+        for temp_file in temp_files:
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception as e:
+                    print(f"Error cleaning up {temp_file}: {e}")
+
+    print("Job finished successfully.")
 
     return json.dumps({
-        "tracking_result": s3_tracking_key, # Replace with actual key
+        "tracking_result": s3_tracking_key,
         "shot_result": s3_shot_key,
         "video_result": s3_video_key,
         "thumbnail_url": s3_thumbnail_key

@@ -17,7 +17,7 @@ six==1.17.0
 typing-inspection==0.4.0
 typing_extensions==4.13.2
 urllib3==2.4.0
-ultralytics==8.0.20
+ultralytics==8.3.153
 opencv-python
 numpy
 scikit-learn
