@@ -14,23 +14,37 @@ from sklearn.cluster import KMeans
 from collections import defaultdict
 
 # --- GLOBAL MODEL INITIALIZATION ---
-model = YOLO("bestv2.pt")
+# IMPORTANT: Make sure this points to your latest and best trained model.
+model = YOLO('modelv5.pt')
 
-def get_dominant_color(image, k=1):
-    """Extracts the dominant color from an image ROI."""
+def get_dominant_hue(image, k=1):
+    """
+    Extracts the dominant hue from an image ROI using the HSV color space.
+    The Hue channel is more robust to lighting changes.
+    """
     if image is None or image.size == 0:
-        return (128, 128, 128)
+        return -1  # Return an invalid hue
+
     try:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = cv2.resize(image, (20, 20))
-        pixels = image.reshape(-1, 3)
+        # Convert the image from BGR to HSV
+        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # We only need the Hue channel (hsv_image[:, :, 0]) for color classification
+        hue_channel = hsv_image[:, :, 0]
+        
+        # Reshape for KMeans
+        pixels = hue_channel.reshape(-1, 1)
+
         if pixels.shape[0] < k:
-             return tuple(map(int, pixels[0])) if pixels.shape[0] > 0 else (128, 128, 128)
+            return int(pixels[0][0]) if pixels.shape[0] > 0 else -1
+
         kmeans = KMeans(n_clusters=k, n_init='auto', random_state=42)
         kmeans.fit(pixels)
-        return tuple(map(int, kmeans.cluster_centers_[0]))
+        
+        # Return the single dominant hue value (0-179 in OpenCV)
+        return int(kmeans.cluster_centers_[0][0])
     except Exception:
-        return (128, 128, 128)
+        return -1
 
 
 async def run_worker(job: Job, token=None):
@@ -80,7 +94,7 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     thumbnail_frame = get_random_frame(cap, frame_count)
     thumbnail_path = f"tmp/{uuid.uuid4()}.jpg"
     if thumbnail_frame is not None:
-        cv2.imwrite(thumbnail_path, thumbnail_frame)
+        cv2.imwrite(thumbnail_path, thumbnail_path)
 
     output_video_path = f"tmp/{uuid.uuid4()}.mp4"
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
@@ -95,27 +109,38 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    print("Extracting dominant colors for team detection...")
-    dominant_colors = []
+    # --- NEW: Team Hue Identification ---
+    print("Extracting dominant hues for team detection...")
+    dominant_hues = []
     for _ in range(min(50, frame_count)):
         ret, frame = cap.read()
         if not ret: break
         results = model(frame, verbose=False)
         for result in results:
-            player_boxes = result.boxes[result.boxes.cls == 2]
+            player_boxes = result.boxes[result.boxes.cls == 2] # Player is class 2
             for box in player_boxes.xyxy:
                 x1, y1, x2, y2 = map(int, box)
                 roi = frame[int(y1 + 0.3 * (y2 - y1)):int(y1 + 0.7 * (y2 - y1)), x1:x2]
                 if roi.size > 0:
-                    dominant_colors.append(get_dominant_color(roi))
+                    hue = get_dominant_hue(roi)
+                    if hue != -1:
+                        dominant_hues.append(hue)
 
-    if len(dominant_colors) >= 2:
-        kmeans = KMeans(n_clusters=2, n_init='auto', random_state=42).fit(dominant_colors)
-        team_colors = kmeans.cluster_centers_
+    team_hues = []
+    if len(dominant_hues) >= 2:
+        hues_for_clustering = np.array(dominant_hues).reshape(-1, 1)
+        kmeans = KMeans(n_clusters=2, n_init='auto', random_state=42).fit(hues_for_clustering)
+        team_hues = kmeans.cluster_centers_.flatten()
+        print(f"Team hues identified: {team_hues}")
     else:
-        team_colors = np.array([[255, 0, 0], [0, 0, 255]])
-    print("Team colors identified.")
+        team_hues = np.array([5, 110]) # Default hues (e.g., Red and Blue)
+        print("Using default team hues.")
 
+    # We classify using Hue, but draw with fixed BGR colors for visibility.
+    # Team 0 will be Blue, Team 1 will be Red.
+    drawing_colors = [(255, 0, 0), (0, 0, 255)] 
+
+    # Reset video capture for the main processing loop
     cap.release()
     cap = cv2.VideoCapture(local_video_path)
     
@@ -128,7 +153,7 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     last_progress = -5
     shot_cooldown = 0
     
-    print("Starting tracking with robust shot detection...")
+    print("Starting tracking with robust team detection...")
     while cap.isOpened():
         start_time = time.time()
         ret, frame = cap.read()
@@ -139,77 +164,61 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
         result = results[0]
         
         annotated_frame = frame.copy()
-        
-        # --- Detect Ball and Ring (Frame-by-Frame) ---
-        ball_boxes = result.boxes[result.boxes.cls == 0]
-        ring_boxes = result.boxes[result.boxes.cls == 1]
-        
-        ball_coords = None
-        ring_bbox = None
-        
-        if len(ball_boxes) > 0:
-            x1, y1, x2, y2 = map(int, ball_boxes[0].xyxy[0])
-            ball_coords = (int((x1 + x2) / 2), int((y1 + y2) / 2))
-            cv2.circle(annotated_frame, ball_coords, 7, (0, 255, 255), -1)
-
-        if len(ring_boxes) > 0:
-            rx1, ry1, rx2, ry2 = map(int, ring_boxes[0].xyxy[0])
-            ring_bbox = [rx1, ry1, rx2, ry2]
-            cv2.rectangle(annotated_frame, (rx1, ry1), (rx2, ry2), (255, 255, 0), 2)
-            pixel_to_meter = np.mean([rx2 - rx1, ry2 - ry1]) / 0.45
-
-        # --- Track Players ---
         player_data_this_frame = []
+        
         if result.boxes.id is not None:
             tracked_players = result.boxes[result.boxes.cls == 2]
             for box in tracked_players:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 track_id = int(box.id[0])
+
+                # --- NEW: Team Assignment using Hue distance ---
                 if track_id not in id_to_team:
                     roi = frame[int(y1 + 0.3 * (y2 - y1)):int(y1 + 0.7 * (y2 - y1)), x1:x2]
-                    team_id = int(np.argmin([np.linalg.norm(np.array(get_dominant_color(roi)) - tc) for tc in team_colors]))
-                    id_to_team[track_id] = team_id
+                    player_hue = get_dominant_hue(roi)
+                    if player_hue != -1:
+                        # Calculate circular distance for Hues (0-179 range)
+                        dist1 = min(abs(player_hue - team_hues[0]), 180 - abs(player_hue - team_hues[0]))
+                        dist2 = min(abs(player_hue - team_hues[1]), 180 - abs(player_hue - team_hues[1]))
+                        team_id = 0 if dist1 < dist2 else 1
+                        id_to_team[track_id] = team_id
 
                 team_id = id_to_team.get(track_id, 0)
                 player_info = {"frame": frame_idx, "player_id": track_id, "team_id": team_id, "bbox": [x1, y1, x2, y2]}
                 player_data.append(player_info)
                 player_data_this_frame.append(player_info)
 
-                color = tuple(map(int, team_colors[team_id]))
+                color = drawing_colors[team_id]
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(annotated_frame, f"#{track_id}", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-        # --- ROBUST SHOT DETECTION LOGIC ---
+        # --- AI-POWERED SHOT DETECTION (Class ID 1) ---
         if shot_cooldown > 0:
             shot_cooldown -= 1
+        made_shot_boxes = result.boxes[result.boxes.cls == 1]
+        if len(made_shot_boxes) > 0 and shot_cooldown == 0:
+            print(f"\n--- AI detected a 'made' shot at frame {frame_idx}! ---")
+            shot_box = made_shot_boxes[0].xyxy[0]
+            shot_x, shot_y = int((shot_box[0] + shot_box[2])/2), int((shot_box[1] + shot_box[3])/2)
+            cv2.circle(annotated_frame, (shot_x, shot_y), 15, (0, 255, 0), 2)
+            cv2.putText(annotated_frame, "GOAL!", (shot_x + 10, shot_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            if player_data_this_frame:
+                nearest_player = min(player_data_this_frame, key=lambda p: np.hypot(((p['bbox'][0] + p['bbox'][2])/2 - shot_x), ((p['bbox'][1] + p['bbox'][3])/2 - shot_y)))
+                shot_data.append({"frame": frame_idx, "x": shot_x, "y": shot_y, "team_id": nearest_player["team_id"], "player_id": nearest_player["player_id"], "result": "made"})
+            shot_cooldown = int(fps)
 
-        if ball_coords and ring_bbox:
-            ring_center_x = (ring_bbox[0] + ring_bbox[2]) // 2
-            ring_center_y = (ring_bbox[1] + ring_bbox[3]) // 2
-            ring_width = ring_bbox[2] - ring_bbox[0]
-
-            # Define a dynamic shot zone based on the ring's size
-            zone_x1 = ring_center_x - ring_width // 2
-            zone_x2 = ring_center_x + ring_width // 2
-            zone_y1 = ring_center_y - 30 # A fixed vertical tolerance
-            zone_y2 = ring_center_y + 30
-
-            # --- DEBUGGING VISUAL: Draw the "Shot Zone" on the video ---
-            cv2.rectangle(annotated_frame, (zone_x1, zone_y1), (zone_x2, zone_y2), (0, 255, 0), 1)
-            
-            # Check if ball is in the zone and cooldown is over
-            if shot_cooldown == 0 and (zone_x1 < ball_coords[0] < zone_x2) and (zone_y1 < ball_coords[1] < zone_y2):
-                print(f"\n--- Shot event detected at frame {frame_idx}! ---")
-                
-                if player_data_this_frame:
-                    nearest_player = min(player_data_this_frame, key=lambda p: np.hypot(((p['bbox'][0] + p['bbox'][2])/2 - ball_coords[0]), ((p['bbox'][1] + p['bbox'][3])/2 - ball_coords[1])))
-                    shot_data.append({
-                        "frame": frame_idx, "x": ball_coords[0], "y": ball_coords[1], 
-                        "team_id": nearest_player["team_id"], "player_id": nearest_player["player_id"], "result": "made"
-                    })
-                
-                shot_cooldown = int(fps) # Start 1-second cooldown
-                
+        # --- Draw other objects using correct NEW class IDs ---
+        other_objects = result.boxes[~np.isin(result.boxes.cls.cpu(), [1, 2])]
+        for box in other_objects:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            cls = int(box.cls[0])
+            if cls == 0: # basketball
+                cv2.circle(annotated_frame, (int((x1+x2)/2), int((y1+y2)/2)), 7, (0, 165, 255), -1)
+            elif cls == 3: # rim
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+            elif cls == 4: # shoot
+                cv2.putText(annotated_frame, "SHOOT", (x1, y1 - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+        
         out.write(annotated_frame)
         frame_idx += 1
         
@@ -227,7 +236,10 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     cap.release()
     out.release()
     
-    if pixel_to_meter:
+    if len(result.boxes[result.boxes.cls == 3]) > 0: # If rim was detected
+        # A simple scaling based on the last known rim detection
+        last_rim_box = result.boxes[result.boxes.cls == 3][-1].xyxy[0]
+        pixel_to_meter = np.mean([last_rim_box[2] - last_rim_box[0], last_rim_box[3] - last_rim_box[1]]) / 0.45
         court_length_px, court_width_px = int(28 / pixel_to_meter), int(15 / pixel_to_meter)
     else:
         court_length_px, court_width_px = None, None
@@ -264,11 +276,10 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
                 os.remove(temp_file)
             except Exception as e:
                 print(f"Error cleaning up {temp_file}: {e}")
-
     print("S3 Upload complete. Job finished.")
 
     return json.dumps({
-        "tracking_result": s3_tracking_key,
+        "tracking_result": s3_tracking_key, # Replace with actual key
         "shot_result": s3_shot_key,
         "video_result": s3_video_key,
         "thumbnail_url": s3_thumbnail_key
