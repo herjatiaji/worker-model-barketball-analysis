@@ -94,7 +94,7 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     thumbnail_frame = get_random_frame(cap, frame_count)
     thumbnail_path = f"tmp/{uuid.uuid4()}.jpg"
     if thumbnail_frame is not None:
-        cv2.imwrite(thumbnail_path, thumbnail_path)
+        cv2.imwrite(thumbnail_path, thumbnail_frame)
 
     output_video_path = f"tmp/{uuid.uuid4()}.mp4"
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
