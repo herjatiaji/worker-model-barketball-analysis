@@ -1,0 +1,9 @@
+# custom_bytetrack.yaml
+tracker_type: bytetrack
+track_high_thresh: 0.5
+track_low_thresh: 0.1
+new_track_thresh: 0.6
+match_thresh: 0.8
+
+# --- Increase the tracker's memory/patience from 30 to 120 frames ---
+track_buffer: 120
