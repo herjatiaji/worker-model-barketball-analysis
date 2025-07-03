@@ -12,4 +12,5 @@ s3_client: S3Client = session.client(
     aws_secret_access_key=settings.S3_SECRET_ACCESS_KEY,
     region_name=settings.S3_REGION,
     config=Config(signature_version='s3v4'),
+    
 )

@@ -12,28 +12,39 @@ import random
 import time
 from sklearn.cluster import KMeans
 from collections import defaultdict
+# --- NEW: Imports for Deep Learning Feature Extraction ---
+import torch
+import torchvision.models as models
+import torchvision.transforms as transforms
+from PIL import Image
 
 # --- GLOBAL MODEL INITIALIZATION ---
 # IMPORTANT: Make sure this points to your latest and best trained model.
 model = YOLO("modelv5.pt")
 
 
-def get_jersey_histogram(roi):
+
+def get_dominant_color(image, k=1):
     """
-    Calculates a normalized color histogram in the HSV space for a jersey ROI.
-    This creates a "fingerprint" of the jersey's color profile.
+    Extracts the dominant color from an image ROI using RGB color space.
     """
-    if roi is None or roi.size == 0:
-        return None
+    if image is None or image.size == 0:
+        return (128, 128, 128) # Return a default gray color
     try:
-        hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        # Calculate histogram for Hue (0-179) and Saturation (0-255). We ignore Value (brightness).
-        hist = cv2.calcHist([hsv_roi], [0, 1], None, [18, 3], [0, 180, 0, 256])
-        cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-        return hist.flatten()
-    except Exception as e:
-        print(f"Error creating histogram: {e}")
-        return None
+        # Convert from BGR (OpenCV's default) to RGB for analysis
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, (20, 20))
+        pixels = image.reshape(-1, 3)
+        
+        # Using n_init='auto' is the modern standard for scikit-learn
+        kmeans = KMeans(n_clusters=k, n_init='auto', random_state=42)
+        kmeans.fit(pixels)
+        return tuple(map(int, kmeans.cluster_centers_[0]))
+    except Exception:
+        return (128, 128, 128)
+
+model = YOLO("modelv5.pt")
+
 
 
 async def run_worker(job: Job, token=None):
@@ -57,7 +68,6 @@ def get_random_frame(cap, frame_count):
 
 
 def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
-    """The main function to process and analyze the video."""
     print(f"Processing job: {job.data}")
     video_url = job.data.get('video_url')
     os.makedirs("tmp", exist_ok=True)
@@ -66,7 +76,6 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     s3_client.download_file(settings.S3_BUCKET, video_url, local_video_path)
 
     # --- PHASE 1: PRE-ANALYSIS SETUP ---
-    print("--- Starting pre-analysis phase ---")
     cap_setup = cv2.VideoCapture(local_video_path)
     if not cap_setup.isOpened():
         print(f"Error: Could not open video at {local_video_path}")
@@ -100,9 +109,10 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
             cap_setup.release()
             return json.dumps({"error": "Failed to create output video file."})
 
-    print("Extracting jersey histograms for team detection...")
-    all_histograms = []
-    player_class_id = 2 # Your class ID for 'player'
+    # Team Signature Identification 
+    print("Extracting dominant colors for team detection...")
+    all_colors = []
+    player_class_id = 2 
     cap_setup.set(cv2.CAP_PROP_POS_FRAMES, 0)
     for _ in range(min(50, frame_count)):
         ret, frame = cap_setup.read()
@@ -113,22 +123,24 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
             for box in player_boxes.xyxy:
                 x1, y1, x2, y2 = map(int, box)
                 roi = frame[int(y1 + 0.3 * (y2 - y1)):int(y1 + 0.7 * (y2 - y1)), x1:x2]
-                hist = get_jersey_histogram(roi)
-                if hist is not None:
-                    all_histograms.append(hist)
+                if roi.size > 0:
+                    color = get_dominant_color(roi)
+                    all_colors.append(color)
     
     cap_setup.release()
     print("--- Pre-analysis complete. ---")
 
-    team_signature_histograms = []
-    if len(all_histograms) >= 2:
-        kmeans = KMeans(n_clusters=2, n_init='auto', random_state=42).fit(all_histograms)
-        team_signature_histograms = kmeans.cluster_centers_
-        print("Team signature histograms identified.")
+    team_colors = []
+    if len(all_colors) >= 2:
+        kmeans = KMeans(n_clusters=2, n_init='auto', random_state=42).fit(all_colors)
+        team_colors = kmeans.cluster_centers_
+        print(f"Team RGB colors identified: {team_colors}")
     else:
         print("Warning: Not enough players found to determine team colors automatically.")
-    
-    drawing_colors = [(255, 0, 0), (0, 0, 255)]
+        team_colors = np.array([[0, 0, 255], [255, 0, 0]]) # Default to Red and Blue
+
+    # --- PHASE 2: MAIN PROCESSING LOOP ---
+    cap_main = cv2.VideoCapture(local_video_path)
 
     # --- PHASE 2: MAIN PROCESSING LOOP ---
     print("Opening a fresh video capture for the main tracking loop...")
@@ -137,29 +149,27 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
         return json.dumps({"error": "Failed to open video for processing."})
 
     id_to_team = {}
-    player_data = []
-    shot_data = []
-    pixel_to_meter = None
-    frame_idx = 0
-    last_progress = -5
-    
+    player_data, shot_data = [], []
+    pixel_to_meter, frame_idx, last_progress = None, 0, -5
     ball_state = {'center': None, 'velocity': (0,0), 'frames_unseen': 0}
     player_shot_cooldowns = defaultdict(int)
     ball_carrier_state = {'track_id': None, 'frame_idx': 0}
-
-    print("Starting analysis with Shot Attempt detection...")
+    
+    print("Starting analysis with robust color and shot detection...")
     while cap_main.isOpened():
         ret, frame = cap_main.read()
         if not ret: break
 
-        results = model.track(frame, persist=True, tracker="bytetrack.yaml", conf=0.3, verbose=False)
+        results = model.track(frame, persist=True,    tracker="bytetrack.yaml",conf=0.3,verbose=False, classes=[0, 1, 2], imgsz=1088 )
         result = results[0]
         annotated_frame = frame.copy()
         
-        ball_detections = result.boxes[result.boxes.cls == 0]
-        player_detections = result.boxes[result.boxes.cls == 2]
+        # Player and Ball detections 
+        player_detections = result.boxes[result.boxes.cls == player_class_id]
+        ball_detections = result.boxes[result.boxes.cls == 0] 
 
-        if ball_detections:
+        # Update ball state with coasting logic
+        if len(ball_detections) > 0:
             b_x1, b_y1, b_x2, b_y2 = map(int, ball_detections[0].xyxy[0])
             current_center = (int((b_x1 + b_x2) / 2), int((b_y1 + b_y2) / 2))
             if ball_state['center']:
@@ -177,28 +187,38 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
         if ball_state['center']:
             cv2.circle(annotated_frame, ball_state['center'], 7, (0, 165, 255), -1)
 
+        # Player processing and team assignment
         player_data_this_frame = []
         if result.boxes.id is not None:
-            tracked_players = result.boxes[result.boxes.cls == 2]
+            tracked_players = result.boxes[result.boxes.cls == player_class_id]
             for box in tracked_players:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 track_id = int(box.id[0])
+
                 if track_id not in id_to_team:
                     roi = frame[int(y1 + 0.3*(y2-y1)):int(y1 + 0.7*(y2-y1)), x1:x2]
-                    player_hist = get_jersey_histogram(roi)
-                    if player_hist is not None and len(team_signature_histograms) == 2:
-                        sim1 = cv2.compareHist(np.float32(player_hist), np.float32(team_signature_histograms[0]), cv2.HISTCMP_CORREL)
-                        sim2 = cv2.compareHist(np.float32(player_hist), np.float32(team_signature_histograms[1]), cv2.HISTCMP_CORREL)
-                        id_to_team[track_id] = 0 if sim1 > sim2 else 1
+                    if roi.size > 0:
+                        player_color = get_dominant_color(roi)
+                        # Use simple Euclidean distance in RGB space
+                        dist1 = np.linalg.norm(np.array(player_color) - team_colors[0])
+                        dist2 = np.linalg.norm(np.array(player_color) - team_colors[1])
+                        team_id = 0 if dist1 < dist2 else 1
+                        id_to_team[track_id] = team_id
                 
                 team_id = id_to_team.get(track_id, 0)
                 player_info = {"frame": frame_idx, "player_id": track_id, "team_id": team_id, "bbox": [x1, y1, x2, y2]}
                 player_data.append(player_info)
                 player_data_this_frame.append(player_info)
-                color = drawing_colors[team_id]
-                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(annotated_frame, f"#{track_id}", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+                # Use the actual team color for drawing
+                color = tuple(map(int, team_colors[team_id]))
+                # OpenCV uses BGR, so we need to convert the color from RGB to BGR for drawing
+                draw_color = (color[2], color[1], color[0]) 
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), draw_color, 2)
+                cv2.putText(annotated_frame, f"#{track_id}", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw_color, 2)
 
+
+        # Shot Attempt Detection
         current_ball_carrier_id = None
         if ball_state['center'] and player_data_this_frame:
             closest_player = min(player_data_this_frame, key=lambda p: np.hypot(((p['bbox'][0] + p['bbox'][2])/2 - ball_state['center'][0]), ((p['bbox'][1] + p['bbox'][3])/2 - ball_state['center'][1])))
@@ -208,13 +228,39 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
                 ball_carrier_state['track_id'] = current_ball_carrier_id
                 ball_carrier_state['frame_idx'] = frame_idx
         
-        if ball_carrier_state['track_id'] is not None and current_ball_carrier_id is None and (frame_idx - ball_carrier_state['frame_idx'] < 3):
-            if player_shot_cooldowns[ball_carrier_state['track_id']] == 0:
+                # --- Blok Deteksi Tembakan yang Diperbarui ---
+        if ball_carrier_state['track_id'] is not None and current_ball_carrier_id is None and (frame_idx - ball_carrier_state['frame_idx'] < 5): # Sedikit menambah jendela waktu
+            shooter_id = ball_carrier_state['track_id']
+            if player_shot_cooldowns[shooter_id] == 0:
                 ball_vy = ball_state['velocity'][1]
+                
+                # Kondisi utama: bola bergerak ke atas
                 if ball_vy < -2:
-                    print(f"\n--- SHOT ATTEMPT detected by Player #{ball_carrier_state['track_id']} at frame {frame_idx}! ---")
-                    shot_data.append({"frame": frame_idx, "player_id": ball_carrier_state['track_id'], "result": "attempt"})
-                    player_shot_cooldowns[ball_carrier_state['track_id']] = int(fps * 2)
+                    
+                    # Cari data pemain yang melakukan tembakan di frame saat ini
+                    shooter_data = next((p for p in player_data_this_frame if p['player_id'] == shooter_id), None)
+                    
+                    if shooter_data:
+                        print(f"\n--- SHOT ATTEMPT detected by Player #{shooter_id} at frame {frame_idx}! ---")
+                        
+                        # Ambil bbox dari data shooter
+                        x1, y1, x2, y2 = shooter_data['bbox']
+                        # Hitung koordinat tengah pemain
+                        shooter_x = int((x1 + x2) / 2)
+                        shooter_y = int((y1 + y2) / 2)
+                        
+                        # --- PERUBAHAN UTAMA: Tambahkan koordinat pemain ke shot_data ---
+                        shot_data.append({
+                            "frame": frame_idx, 
+                            "player_id": shooter_id,
+                            "team_id": shooter_data['team_id'], # Tambahkan juga team_id
+                            "result": "attempt",
+                            "player_coords": {"x": shooter_x, "y": shooter_y}, # Koordinat pemain
+                            "ball_coords": ball_state['center'] # Koordinat bola saat dilepaskan
+                        })
+                        
+                        # Mulai cooldown untuk pemain ini
+                        player_shot_cooldowns[shooter_id] = int(fps * 2)
 
         for pid in list(player_shot_cooldowns.keys()):
             if player_shot_cooldowns[pid] > 0:
