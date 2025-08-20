@@ -21,4 +21,8 @@ ultralytics==8.3.153
 opencv-python
 numpy
 scikit-learn
+uvicorn==0.35.0 
+fastapi==0.116.1
+pydantic==2.11.3
+pydantic-core==2.33.1
 
