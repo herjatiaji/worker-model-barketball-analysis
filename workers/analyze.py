@@ -13,6 +13,7 @@ import time
 from sklearn.cluster import KMeans
 from collections import defaultdict
 from PIL import Image
+from botocore.exceptions import ClientError
 
 # --- NEW: Imports for Database Interaction ---
 from sqlalchemy import insert, update, func
@@ -59,7 +60,17 @@ def analyze_video(job: Job, loop: asyncio.AbstractEventLoop):
     video_url = job.data.get('video_url')
     os.makedirs("tmp", exist_ok=True)
     local_video_path = f"tmp/{uuid.uuid4()}.mp4"
-    s3_client.download_file(settings.S3_BUCKET, video_url, local_video_path)
+    # s3_client.download_file(settings.S3_BUCKET, video_url, local_video_path)
+    try:
+        print(f"Downloading video from S3: s3://{settings.S3_BUCKET}/{video_url}")
+        s3_client.download_file(settings.S3_BUCKET, video_url, local_video_path)
+        print("Video downloaded successfully.")
+    except ClientError as e:
+        # Menangkap error spesifik dari S3 (contoh: file tidak ditemukan / 'NoSuchKey')
+        error_code = e.response.get("Error", {}).get("Code")
+        error_message = f"S3 download failed. Code: {error_code}. Message: {str(e)}"
+        print(f"FATAL: {error_message}")
+        raise RuntimeError('ERR_MEDIA_UPLOAD')
 
     cap_setup = cv2.VideoCapture(local_video_path)
     if not cap_setup.isOpened():
